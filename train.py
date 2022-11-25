@@ -16,7 +16,10 @@ if __name__ == '__main__':
     ap.add_argument("file", metavar="FILE", help="file with SMILES")
     ap.add_argument("-r", "--learning-rate", metavar="RATE", default=1.0e-3, type=float, dest="learning_rate",
                     help="Default is %(default)s.")
+    ap.add_argument("--split", metavar="NUMBER", default=0.75, type=float, dest="split", help="fraction of data to use for training.")
+    ap.add_argument("--max-data", metavar="NUMBER", default=100, type=int, dest="max_data", help="max subset of data.")
     ap.add_argument("-e", metavar="NUMBER", dest="epochs", default=10, type=int, help="Number of epochs. Default is %(default)s.")
+
     encoder_ap = ap.add_argument_group("Encoder")
     encoder_ap.add_argument("--encoding-length", metavar="LENGTH", default=110,
                     help="Length of encoding. Default is %(default)s.")
@@ -48,15 +51,16 @@ if __name__ == '__main__':
     print("------")
 
     # data preparation
-    input = input[0:100][:]
-    lengths = lengths[0:100][:]
-    n_split = int(0.75*len(input))
+    max_data = args.max_data
+    input = input[0:max_data][:]
+    lengths = lengths[0:max_data][:]
+    n_split = int(args.split*len(input))
 
     train_input = input[0:n_split]
-    test_input = input[n_split:100]
+    test_input = input[n_split:max_data]
 
     train_lengths = lengths[0:n_split]
-    test_lengths = lengths[n_split:100]
+    test_lengths = lengths[n_split:max_data]
     # done
 
     v = VariationalAutoEncoder(latent_size=latent_size, vocab_size=len(alphabet), batch_size=batch_size,
@@ -114,6 +118,6 @@ if __name__ == '__main__':
         # v.save_weights("saved/checkpoint", save_format="tf")
         # v.save("saved/checkpoint.tf", save_format="tf")
         print(f"Epoch {epoch+1:03d} finished in {dt_epoch/60:.1f} min.")
-    v.sample()
+    # v.sample()
     tf.saved_model.save(v, "saved/checkpoint")
     v.summary()

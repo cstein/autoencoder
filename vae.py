@@ -42,7 +42,7 @@ class Encoder(keras.layers.Layer):
                 name="sigma_bias"
         )
 
-    def call(self, inputs):
+    def call(self, inputs, *args, **kwargs):
         # print("\n\n **** ENCODER ****")
         # print("    ... call ...")
         state = self.rnn(inputs)
@@ -144,7 +144,7 @@ class VariationalAutoEncoder(keras.Model):
                 trainable=True
         )
 
-    def call(self, inputs):
+    def call(self, inputs, *args, **kwargs):
         self.x = tf.nn.embedding_lookup(self.embedding_encode, tf.cast(inputs, dtype=dtypes.int32))
 
         latent = self.encoder(self.x)
