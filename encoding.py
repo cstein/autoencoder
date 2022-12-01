@@ -1,15 +1,17 @@
 import collections
 
 import numpy as np
-
-import rdkit
-from numpy import void
 from rdkit import Chem
 
 
-def encode(can_smiles: list[str], seq_length, ignore_large=False):
-    """ Encodes a list of smiles strings """
-    all_smiles = "".join(can_smiles)
+def encode(canonical_smiles: list[str], seq_length: int, ignore_large: bool = False):
+    """ Encodes a list of smiles strings with a one-hot style encoding
+
+        :param canonical_smiles: list of unique canonical smiles
+        :param seq_length: the length of the sequence encoding
+        :param ignore_large: removes large molecules from the population
+    """
+    all_smiles = "".join(canonical_smiles)
     counter = collections.Counter(all_smiles)
     count_pairs = sorted(counter.items(), key=lambda x: -x[1])
     chars, counts = zip(*count_pairs)
@@ -18,9 +20,9 @@ def encode(can_smiles: list[str], seq_length, ignore_large=False):
     vocab["E"] = len(chars)-2
     vocab["X"] = len(chars)-1
     
-    lengths = [len(s)+1 for s in can_smiles]
-    smiles_input = [("X"+s).ljust(seq_length, "E") for s in can_smiles]
-    smiles_output = [s.ljust(seq_length, "E") for s in can_smiles]
+    lengths = [len(s) + 1 for s in canonical_smiles]
+    smiles_input = [("X"+s).ljust(seq_length, "E") for s in canonical_smiles]
+    smiles_output = [s.ljust(seq_length, "E") for s in canonical_smiles]
     encoding_input = np.array([np.array(list(map(vocab.get, s))) for s in smiles_input])
     for i, encoded_state in enumerate(encoding_input, start=1):
         if length_of_encoded_state := len(encoded_state) > seq_length:
@@ -34,13 +36,17 @@ def encode(can_smiles: list[str], seq_length, ignore_large=False):
 
 
 def load_smiles_file(filename: str) -> list[str]:
+    """ Loads a smiles file
+
+        :param filename: the file to read
+        :returns: a list of smiles from the file
+    """
     smiles = []
     with open(filename, "r") as f:
         for line in f:
             tokens = line.split()
             smiles.append(tokens[0])
     return smiles
-
 
 
 if __name__ == '__main__':
