@@ -7,7 +7,7 @@ from vae import VariationalAutoEncoder
 import encoding
 
 
-def generate_encoded_result(encoder: VariationalAutoEncoder, encoding_length: int, start_codon) -> list[np.ndarray]:
+def generate_encoded_result(encoder: VariationalAutoEncoder, encoding_length: int, start_codon) -> np.ndarray:
     vae_results = []
     generated_vector = start_codon[:]
 
@@ -16,12 +16,11 @@ def generate_encoded_result(encoder: VariationalAutoEncoder, encoding_length: in
         generated_vector, _ = v(generated_vector)
         vae_results.append(generated_vector)
 
-    return np.concatenate(vae_results, 1).astype(int).squeeze()
+    return np.asarray(np.concatenate(vae_results, 1).astype(int).squeeze())
 
 
 def convert_to_smiles(vector: np.ndarray, char):
     list_char = list(char)
-    #list_char = char.tolist()
     vector = vector.astype(int)
     return "".join(map(lambda x: list_char[x], vector)).strip()
 
@@ -43,6 +42,7 @@ if __name__ == '__main__':
     rnn_ap.add_argument("--rnn-unit-size", metavar="NUMBER", dest="rnn_unit_size", default=512,
                         help="size of the RNN. Default is %(default)s.")
     args = ap.parse_args()
+    print(args)
     latent_size = 200
     batch_size = args.batch_size
     # vocab_size = 35
@@ -51,39 +51,37 @@ if __name__ == '__main__':
     mean = args.mean
     stddev = args.sigma
 
-    smiles = encoding.load_smiles_file(args.file)
-    can_smiles = [Chem.MolToSmiles(Chem.MolFromSmiles(s), True) for s in smiles]
+    input_smiles = encoding.load_smiles_file(args.file)
+    can_smiles = [Chem.MolToSmiles(Chem.MolFromSmiles(s), True) for s in input_smiles]
     input, output, alphabet, vocabulary, lengths = encoding.encode(can_smiles, encoding_seq_length)
 
     start_codon = np.array([np.array(list(map(vocabulary.get, 'X'))) for _ in range(batch_size)])
     vocab_size = len(vocabulary)
     # print(input[0])
     outputs = []
-    smiles = []
+    output_smiles = []
     v = VariationalAutoEncoder(latent_size=latent_size, vocab_size=vocab_size, batch_size=batch_size,
                                unit_size=unit_size, mean=mean, stddev=stddev)
 
     v.load_weights("saved/checkpoint").expect_partial()
 
     for i in range(args.num_iterations):
-        outputs.append(generate_encoded_result(v, encoding_seq_length, start_codon))
+        outputs.extend(generate_encoded_result(v, encoding_seq_length, start_codon))
 
-        output: np.ndarray
-        for output in outputs:
-            all_smiles = convert_to_smiles(output, vocabulary)
-            if "E" in all_smiles:
-                tokens = all_smiles.split("E")
+    output: np.ndarray
+    for i, output in enumerate(outputs):
+        all_smiles = convert_to_smiles(output, vocabulary)
+        if "E" in all_smiles:
+            tokens = all_smiles.split("E")
 
-                if tokens[0] in smiles:
-                    continue
+            # if tokens[0] in output_smiles:
+            #     continue
 
-                if mol := Chem.MolFromSmiles(tokens[0]):
-                    smiles.append(tokens[0])
+            if Chem.MolFromSmiles(tokens[0]) is not None:
+                output_smiles.append(tokens[0])
 
-            # smiles.append()
-        # strings = "".join(smiles)
-    print(f"found {len(smiles)} valid molecules (with duplicates).")
-    smiles = set(smiles)
-    smiles = list(smiles)
-    print(f"found {len(smiles)} valid molecules (without duplicates).")
-    print(smiles)
+    print(f"found {len(output_smiles)} valid molecules (with duplicates).")
+    output_smiles = set(output_smiles)
+    output_smiles = list(output_smiles)
+    print(f"found {len(output_smiles)} valid molecules (without duplicates).")
+    print(output_smiles)
