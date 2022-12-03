@@ -1,4 +1,5 @@
 import argparse
+import csv
 
 import numpy as np
 from rdkit import Chem
@@ -13,7 +14,7 @@ def generate_encoded_result(encoder: VariationalAutoEncoder, encoding_length: in
 
     encoder.reset()
     for j in range(encoding_length):
-        generated_vector, _ = v(generated_vector)
+        generated_vector, _ = encoder(generated_vector)
         vae_results.append(generated_vector)
 
     return np.asarray(np.concatenate(vae_results, 1).astype(int).squeeze())
@@ -33,6 +34,9 @@ if __name__ == '__main__':
                     help="standard deviation of latent space sampling")
     ap.add_argument("-i", "--iterations", metavar="NUMBER", type=int, default=10, dest="num_iterations", help="number of iterations to run. Default is %(default)s.")
     ap.add_argument("file", metavar="FILE", help="file with SMILES")
+    ap.add_argument("-o", "--output", metavar="FILE", default=None, help="The filename (.csv format) to use for output.")
+    ap.add_argument("-q", action="store_false", default=True, dest="is_verbose", help="specify to hide output.")
+
     decoder_ap = ap.add_argument_group("Decoder")
     decoder_ap.add_argument("--batch-size", metavar="SIZE", default=1, type=int,
                     help="Size of the batch when training. Default is %(default)s.")
@@ -45,7 +49,6 @@ if __name__ == '__main__':
     print(args)
     latent_size = 200
     batch_size = args.batch_size
-    # vocab_size = 35
     unit_size = args.rnn_unit_size
     encoding_seq_length = 110
     mean = args.mean
@@ -61,7 +64,7 @@ if __name__ == '__main__':
     outputs = []
     output_smiles = []
     v = VariationalAutoEncoder(latent_size=latent_size, vocab_size=vocab_size, batch_size=batch_size,
-                               unit_size=unit_size, mean=mean, stddev=stddev)
+                               rnn_dimension=unit_size, mean=mean, stddev=stddev)
 
     v.load_weights("saved/checkpoint").expect_partial()
 
@@ -74,9 +77,6 @@ if __name__ == '__main__':
         if "E" in all_smiles:
             tokens = all_smiles.split("E")
 
-            # if tokens[0] in output_smiles:
-            #     continue
-
             if Chem.MolFromSmiles(tokens[0]) is not None:
                 output_smiles.append(tokens[0])
 
@@ -85,3 +85,13 @@ if __name__ == '__main__':
     output_smiles = list(output_smiles)
     print(f"found {len(output_smiles)} valid molecules (without duplicates).")
     print(output_smiles)
+    if args.output is not None:
+        with open(args.output, "w") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["SMILES"])
+            for s in output_smiles:
+                writer.writerow([s])
+    else:
+        for s in output_smiles:
+            if args.is_verbose:
+                print(s)

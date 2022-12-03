@@ -11,30 +11,29 @@ class Encoder(keras.layers.Layer):
         Encodes some input to the latent space.
     """
     def __init__(self,
-                 unit_size: int,
-                 latent_size: int,
                  batch_size: int,
+                 latent_size: int,
+                 rnn_num_dimensions: int,
+                 rnn_num_layers: int,
                  mean: float,
                  stddev: float):
         """ Initializes the Encoder
-
-            :param unit_size: the size of each of the RNNs
-            :param latent_size: the size of the latent space
             :param batch_size: size of the incoming batches of data
+            :param latent_size: the size of the latent space
+            :param rnn_num_dimensions: the size of each of the RNNs
+            :param rnn_num_layers: number of layers in the rnn
             :param mean: mean added to the latent space vector
             :param stddev: spread of the mean added to the latent space vector
         """
         super(Encoder, self).__init__(name="encoder")
-        self.unit_size = unit_size
+        self.rnn_num_dimensions = rnn_num_dimensions
         self.latent_size = latent_size
         self.batch_size = batch_size
         self.mean = mean
         self.standard_deviation = stddev
 
         self.rnn = keras.layers.RNN(
-                [keras.layers.LSTMCell(self.unit_size),
-                 keras.layers.LSTMCell(self.unit_size),
-                 keras.layers.LSTMCell(self.unit_size)],
+                [keras.layers.LSTMCell(rnn_num_dimensions) for _ in range(rnn_num_layers)],
                 return_state=True
         )
 
@@ -42,7 +41,7 @@ class Encoder(keras.layers.Layer):
         """ Builds the neural network for the encoder """
         w_init = keras.initializers.GlorotUniform(seed=random.randint(0, 65536))
         self.w_mean = tf.Variable(
-                initial_value=w_init(shape=[self.unit_size, self.latent_size]),
+                initial_value=w_init(shape=[self.rnn_num_dimensions, self.latent_size]),
                 name="mean_weight"
         )
         b_init = tf.zeros_initializer()
@@ -52,7 +51,7 @@ class Encoder(keras.layers.Layer):
         )
 
         self.w_sigma = tf.Variable(
-                initial_value=w_init(shape=[self.unit_size, self.latent_size]),
+                initial_value=w_init(shape=[self.rnn_num_dimensions, self.latent_size]),
                 name="sigma_weight"
         )
 
@@ -74,22 +73,23 @@ class Encoder(keras.layers.Layer):
 
 
 class Decoder(keras.layers.Layer):
-    def __init__(self, unit_size, vocab_size, batch_size):
+    def __init__(self,
+                 batch_size: int,
+                 vocab_size: int,
+                 rnn_num_dimensions: int,
+                 rnn_num_layers: int):
         """ Initializes the decoder
-
-            :param unit_size: the size of each of the RNNs
             :param vocab_size: the number of characters to remember
             :param batch_size: size of the incoming batches of data
-
+            :param rnn_num_layers: number of layers in the rnn
+            :param rnn_num_dimensions: the size of each of the RNNs
         """
         super(Decoder, self).__init__(name="decoder")
-        self.unit_size = unit_size
+        self.rnn_num_dimensions = rnn_num_dimensions
         self.vocab_size = vocab_size
         self.batch_size = batch_size
         self.rnn = keras.layers.RNN(
-                [keras.layers.LSTMCell(self.unit_size),
-                 keras.layers.LSTMCell(self.unit_size),
-                 keras.layers.LSTMCell(self.unit_size)],
+                [keras.layers.LSTMCell(rnn_num_dimensions) for _ in range(rnn_num_layers)],
                 return_state=True,
                 return_sequences=True
         )
@@ -98,7 +98,7 @@ class Decoder(keras.layers.Layer):
         w_init = tf.random_uniform_initializer(minval=-0.1, maxval=0.1)
         self.w = tf.Variable(
                 initial_value=w_init(
-                        shape=[self.unit_size, self.vocab_size],
+                        shape=[self.rnn_num_dimensions, self.vocab_size],
                         dtype=dtypes.float32),
                 name="weight"
         )
@@ -124,19 +124,20 @@ class Decoder(keras.layers.Layer):
 
 class VariationalAutoEncoder(keras.Model):
     def __init__(self,
-                 latent_size,
-                 vocab_size,
-                 batch_size,
-                 unit_size,
-                 mean=0.0,
-                 stddev=1.0,
+                 latent_size: int,
+                 vocab_size: int,
+                 batch_size: int,
+                 rnn_num_dimensions: int,
+                 rnn_num_layers: int,
+                 mean: float = 0.0,
+                 stddev: float = 1.0,
                  name="autoencoder"):
         """ Creates the variational autoencoder
-
             :param latent_size: the size of the latent space
             :param vocab_size: the number of characters to remember
             :param batch_size: size of the incoming batches of data
-            :param unit_size: the size of each of the RNNs
+            :param rnn_num_dimensions: the size of each of the RNNs
+            :param rnn_num_layers: number of layers in the rnn
             :param mean: mean added to the latent space vector
             :param stddev: spread of the mean added to the latent space vector
             :param name: the internal name
@@ -147,15 +148,16 @@ class VariationalAutoEncoder(keras.Model):
         self.mean = mean
         self.standard_deviation = stddev
 
-        # we need to be able to reset the RNN when we
+        # we need to be able to reset the RNNs when we
         # want to make a prediction, so we need to store
-        # the initial empty state
+        # an initial empty state that we can reuse. See
+        # the method `reset` below
         self.rnn_initial_state = tuple(
                 [
                     tf.compat.v1.nn.rnn_cell.LSTMStateTuple(
-                            tf.zeros(shape=(batch_size, unit_size)),
-                            tf.zeros(shape=(batch_size, unit_size))
-                    ) for i in range(3)
+                            tf.zeros(shape=(batch_size, rnn_num_dimensions)),
+                            tf.zeros(shape=(batch_size, rnn_num_dimensions))
+                    ) for _ in range(rnn_num_layers)
                 ]
         )
         self.rnn_state = self.rnn_initial_state[:]
@@ -167,8 +169,11 @@ class VariationalAutoEncoder(keras.Model):
                 trainable=True
         )
 
-        self.encoder = Encoder(unit_size=unit_size, latent_size=latent_size, batch_size=batch_size, mean=mean, stddev=stddev)
-        self.decoder = Decoder(unit_size=unit_size, vocab_size=vocab_size, batch_size=batch_size)
+        self.encoder = Encoder(batch_size=batch_size, latent_size=latent_size,
+                               rnn_num_dimensions=rnn_num_dimensions, rnn_num_layers=rnn_num_layers,
+                               mean=mean, stddev=stddev)
+        self.decoder = Decoder(batch_size=batch_size, vocab_size=vocab_size,
+                               rnn_num_dimensions=rnn_num_dimensions, rnn_num_layers=rnn_num_layers)
 
     def call(self, inputs, training: bool = False, mask: bool = None):
         x = tf.nn.embedding_lookup(self.embedding_encode, tf.cast(inputs, dtype=dtypes.int32))
@@ -192,4 +197,3 @@ class VariationalAutoEncoder(keras.Model):
             This is used when making predictions
         """
         self.rnn_state = self.rnn_initial_state[:]
-
