@@ -3,6 +3,8 @@ import argparse
 
 import numpy as np
 from rdkit import Chem
+from rdkit.Chem import Descriptors
+from rdkit.Chem import Crippen
 import tensorflow as tf
 import tensorflow_addons as tfa
 from tensorflow import dtypes
@@ -12,9 +14,17 @@ from vae import VariationalAutoEncoder
 
 
 @tf.function
-def train_step(inputs, outputs, lengths, autoencoder):
+def train_step(inputs, outputs, lengths, properties, optimizer, autoencoder: VariationalAutoEncoder):
+    """ Performs a single training step (forward pass and backward pass)
+
+        :param inputs: encoded inputs used for training
+        :param outputs: encoded target outputs used for training
+        :param lengths: the lengths of the target outputs
+        :param properties: the properties to use in training
+        :param autoencoder: the autoencoder to use
+    """
     with tf.GradientTape() as tape:
-        reconstructed, y_log = autoencoder(inputs, training=True)
+        reconstructed, y_log = autoencoder((inputs, properties), training=True)
 
         weights = tf.sequence_mask(lengths, encoding_seq_length)
         weights = tf.cast(weights, dtype=dtypes.int32)
@@ -61,6 +71,13 @@ if __name__ == '__main__':
 
     smiles = encoding.load_smiles_file(args.file)
     can_smiles = [Chem.MolToSmiles(Chem.MolFromSmiles(s), True) for s in smiles]
+    p = np.array([
+        [
+            Descriptors.ExactMolWt(Chem.MolFromSmiles(s)),
+            Crippen.MolLogP(Chem.MolFromSmiles(s))
+        ]
+        for s in can_smiles
+    ])
     encoding_seq_length = args.encoding_length
     latent_size = args.latent_length
     batch_size = args.batch_size
@@ -85,7 +102,7 @@ if __name__ == '__main__':
     v = VariationalAutoEncoder(latent_size=latent_size, vocab_size=len(alphabet), batch_size=batch_size,
                                rnn_num_dimensions=rnn_dimensions, rnn_num_layers=rnn_layers_size)
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate)
+    adam_optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate)
 
     epochs = args.epochs
     lat_loss = 0.0
@@ -99,8 +116,9 @@ if __name__ == '__main__':
             train_repr = np.array([train_input[i] for i in n])
             train_repr_y = np.array([train_output[i] for i in n])
             l = np.array([train_lengths[i] for i in n])
+            c = np.array([p[i] for i in n])
 
-            lat_loss, rec_loss = train_step(train_repr, train_repr_y, l, v)
+            lat_loss, rec_loss = train_step(train_repr, train_repr_y, l, c, adam_optimizer, v)
 
             dt_step = time.time() - t_train_step
             if step % 20 == 0:

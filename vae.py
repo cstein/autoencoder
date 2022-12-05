@@ -146,7 +146,7 @@ class VariationalAutoEncoder(keras.Model):
         self.batch_size = batch_size
         self.latent_size = latent_size
         self.mean = mean
-        self.standard_deviation = stddev
+        self.stddev = stddev
 
         # we need to be able to reset the RNNs when we
         # want to make a prediction, so we need to store
@@ -176,19 +176,24 @@ class VariationalAutoEncoder(keras.Model):
                                rnn_num_dimensions=rnn_num_dimensions, rnn_num_layers=rnn_num_layers)
 
     def call(self, inputs, training: bool = False, mask: bool = None):
-        x = tf.nn.embedding_lookup(self.embedding_encode, tf.cast(inputs, dtype=dtypes.int32))
-        if training:
-            latent = self.encoder(x)
-        else:
-            latent = tf.random.normal([self.batch_size, self.latent_size], mean=self.mean, stddev=self.standard_deviation)
-        z = tf.tile(tf.expand_dims(latent, 1), [1, tf.shape(x)[1], 1])
-        inp = tf.concat([z, x], axis=-1)
+        (inps, properties) = inputs
 
-        y, y_logits, state = self.decoder(inp, state=self.rnn_state)
+        x = tf.nn.embedding_lookup(self.embedding_encode, tf.cast(inps, dtype=dtypes.int32))
+        properties = tf.tile(tf.expand_dims(properties, 1), [1, tf.shape(x)[1], 1])
+
+        if training:
+            encoder_input = tf.concat([x, properties], axis=-1)
+            latent = self.encoder(encoder_input)
+            self.add_loss(self.encoder.losses)
+        else:
+            latent = tf.random.normal([self.batch_size, self.latent_size], mean=self.mean, stddev=self.stddev)
+        padded_latent = tf.tile(tf.expand_dims(latent, 1), [1, tf.shape(x)[1], 1])
+        decoder_input = tf.concat([padded_latent, x, properties], axis=-1)
+
+        y, y_logits, state = self.decoder(decoder_input, state=self.rnn_state)
         if not training:
             self.rnn_state = state[:]
 
-        self.add_loss(self.encoder.losses)
         return tf.argmax(y, axis=2), y_logits
 
     def reset(self):
