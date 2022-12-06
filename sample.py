@@ -1,5 +1,7 @@
 import argparse
 import csv
+import json
+import os
 
 import numpy as np
 from rdkit import Chem
@@ -8,13 +10,13 @@ from vae import VariationalAutoEncoder
 import encoding
 
 
-def generate_encoded_result(encoder: VariationalAutoEncoder, encoding_length: int, start_codon) -> np.ndarray:
+def generate_encoded_result(autoencoder: VariationalAutoEncoder, encoding_length: int, start_codon, properties) -> np.ndarray:
     vae_results = []
     generated_vector = start_codon[:]
 
-    encoder.reset()
+    autoencoder.reset()
     for j in range(encoding_length):
-        generated_vector, _ = encoder(generated_vector)
+        generated_vector, _ = autoencoder((generated_vector, properties))
         vae_results.append(generated_vector)
 
     return np.asarray(np.concatenate(vae_results, 1).astype(int).squeeze())
@@ -27,49 +29,74 @@ def convert_to_smiles(vector: np.ndarray, char):
 
 
 if __name__ == '__main__':
-    ap = argparse.ArgumentParser("VAE", "python vae.py my_smiles_file.smi", "Trains the variational autoencoder")
+    # TODO make it so sampling only takes as few parameters as possible
+    #      concerning the model (i.e. batch size or RNN options are left
+    #      to a config.json file) that is given on the command line and
+    #      produced when training happens.
+    #      things that are related to sampling (mean, stddev etc) are
+    #      of course needed
+    ap = argparse.ArgumentParser("Sampler", "python sample.py train.json", "samples from a VAE")
     ap.add_argument("--mean", metavar="NUMBER", default=0.0, type=float,
                     help="mean value to adjust latent space sampling")
     ap.add_argument("--sigma", metavar="NUMBER", default=1.0, type=float,
                     help="standard deviation of latent space sampling")
     ap.add_argument("-i", "--iterations", metavar="NUMBER", type=int, default=10, dest="num_iterations", help="number of iterations to run. Default is %(default)s.")
-    ap.add_argument("file", metavar="FILE", help="file with SMILES")
+    ap.add_argument("-f", dest="file", metavar="FILE", help=".json file with configuration.")
     ap.add_argument("-o", "--output", metavar="FILE", default=None, help="The filename (.csv format) to use for output.")
     ap.add_argument("-q", action="store_false", default=True, dest="is_verbose", help="specify to hide output.")
+    ap.add_argument("-p", nargs="*", type=float)
 
-    decoder_ap = ap.add_argument_group("Decoder")
-    decoder_ap.add_argument("--batch-size", metavar="SIZE", default=1, type=int,
-                    help="Size of the batch when training. Default is %(default)s.")
-    rnn_ap = ap.add_argument_group("RNN Layers", "Controls options regarding how the RNN is used.")
-    rnn_ap.add_argument("--rnn-layers", metavar="NUMBER", dest="rnn_layers_size", default=3,
-                        help="Number of layers in the RNN. Default is %(default)s.")
-    rnn_ap.add_argument("--rnn-unit-size", metavar="NUMBER", dest="rnn_unit_size", default=512,
-                        help="size of the RNN. Default is %(default)s.")
     args = ap.parse_args()
     print(args)
-    latent_size = 200
-    batch_size = args.batch_size
-    unit_size = args.rnn_unit_size
-    encoding_seq_length = 110
+    with open(args.file, "r") as f:
+        settings = json.load(f)
+
+    latent_size = settings["latent_length"]
+    batch_size = settings["batch_size"]
+    unit_size = settings["rnn_dimensions"]
+    rnn_num_layers = settings["rnn_layers_size"]
+    encoding_seq_length = settings["encoding_length"]
+    smiles_file = settings["file"]
+    backup_folder = settings["backup_folder"]
+    backup_checkpoint = settings["backup_checkpoint"]
+    backup_numbering = settings["backup_numbering"]
+    model_path = os.path.join(backup_folder, backup_checkpoint)
+    num_epochs = settings["epochs"]
+    full_backup_path = os.path.join(backup_folder, backup_checkpoint)
+    if backup_numbering:
+        filename, _ = os.path.splitext(backup_checkpoint)
+        # we iterate from the last iteration in an attempt to find
+        # the file with the _highest_ epoch in the filename
+        for i in range(num_epochs, 0, -1):
+            potential_model_path = os.path.join(backup_folder, f"{filename}_{i:03d}.ckpt")
+            # we check if the .index file of the model is present
+            # which signals that this is the model to use.
+            if os.path.isfile(potential_model_path + ".index"):
+                model_path = potential_model_path
+                break
+
     mean = args.mean
     stddev = args.sigma
 
-    input_smiles = encoding.load_smiles_file(args.file)
+    input_smiles = encoding.load_smiles_file(smiles_file)
     can_smiles = [Chem.MolToSmiles(Chem.MolFromSmiles(s), True) for s in input_smiles]
     input, output, alphabet, vocabulary, lengths = encoding.encode(can_smiles, encoding_seq_length)
 
     start_codon = np.array([np.array(list(map(vocabulary.get, 'X'))) for _ in range(batch_size)])
+    properties = np.array([args.p for _ in range(batch_size)])
+
     vocab_size = len(vocabulary)
     # print(input[0])
     outputs = []
     output_smiles = []
     v = VariationalAutoEncoder(latent_size=latent_size, vocab_size=vocab_size, batch_size=batch_size,
-                               rnn_dimension=unit_size, mean=mean, stddev=stddev)
+                               rnn_num_dimensions=unit_size, rnn_num_layers=rnn_num_layers,
+                               mean=mean, stddev=stddev)
 
-    v.load_weights("saved/checkpoint").expect_partial()
+    v.load_weights(model_path).expect_partial()
 
     for i in range(args.num_iterations):
-        outputs.extend(generate_encoded_result(v, encoding_seq_length, start_codon))
+        outputs.extend(generate_encoded_result(v, encoding_seq_length, start_codon, properties))
 
     output: np.ndarray
     for i, output in enumerate(outputs):
