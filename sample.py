@@ -83,7 +83,9 @@ if __name__ == '__main__':
     input, output, alphabet, vocabulary, lengths = encoding.encode(can_smiles, encoding_seq_length)
 
     start_codon = np.array([np.array(list(map(vocabulary.get, 'X'))) for _ in range(batch_size)])
-    properties = np.array([args.p for _ in range(batch_size)])
+    properties = np.array([[] for _ in range(batch_size)])
+    if args.p is not None:
+        properties = np.array([args.p for _ in range(batch_size)])
 
     vocab_size = len(vocabulary)
     # print(input[0])
