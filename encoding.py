@@ -1,7 +1,9 @@
 import collections
 
 import numpy as np
+import pandas as pd
 from rdkit import Chem
+import selfies as sf
 
 
 def encode(canonical_smiles: list[str], seq_length: int, ignore_large: bool = False):
@@ -35,6 +37,31 @@ def encode(canonical_smiles: list[str], seq_length: int, ignore_large: bool = Fa
     return encoding_input, encoding_output, chars, vocab, lengths
 
 
+def encode_selfies(selfies: list[str], seq_length: int):
+    """ Encodes a list of selfies strings with one-hot encoding """
+    def build_input_encoding(selfie: str, max_length: int, vocabulary: dict):
+        encoded_input = [vocabulary.get("X")] + [vocabulary.get(char) for char in sf.split_selfies(selfie)]
+        while len(encoded_input) < max_length:
+            encoded_input.append(vocabulary.get("E"))
+        return encoded_input
+
+    def build_output_encoding(selfie: str, max_length: int, vocabulary: dict):
+        encoded_output = [vocabulary.get(char) for char in sf.split_selfies(selfie)]
+        while len(encoded_output) < max_length:
+            encoded_output.append(vocabulary.get("E"))
+        return encoded_output
+
+    """ Encodes a list of selfies with custom one-hot encoding """
+    chars = list(sorted(sf.get_alphabet_from_selfies(selfies)))
+    chars += ("E", "X")
+    vocab = dict(zip(chars, range(len(chars))))
+
+    lengths = [sf.len_selfies(s) + 1 for s in selfies]
+    encoding_inputs = np.array([build_input_encoding(s, seq_length, vocab) for s in selfies])
+    encoding_outputs = np.array([build_output_encoding(s, seq_length, vocab) for s in selfies])
+    return encoding_inputs, encoding_outputs, chars, vocab, lengths
+
+
 def load_smiles_file(filename: str) -> list[str]:
     """ Loads a smiles file
 
@@ -47,6 +74,14 @@ def load_smiles_file(filename: str) -> list[str]:
             tokens = line.split()
             smiles.append(tokens[0])
     return smiles
+
+
+def load_csv_file(filename: str) -> pd.DataFrame:
+    """ Attempts to load a .csv file. Aborts if a column named SMILES is not found. """
+    df = pd.read_csv(filename)
+    if "SMILES" not in df:
+        raise ValueError(f"A column named 'SMILES' was not found in {filename}")
+    return df
 
 
 if __name__ == '__main__':

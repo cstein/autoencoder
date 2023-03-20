@@ -4,15 +4,22 @@ import json
 import time
 
 import numpy as np
+import pandas as pd
 from rdkit import Chem
-from rdkit.Chem import Descriptors
-from rdkit.Chem import Crippen
 import tensorflow as tf
 import tensorflow_addons as tfa
 from tensorflow import dtypes
 
 import encoding
 from vae import VariationalAutoEncoder
+from utils.state import save
+
+has_selfies = True
+try:
+    import selfies as sf
+except ImportError:
+    print("selfies not found.")
+    has_selfies = False
 
 """
    Comments from Lars:
@@ -21,32 +28,52 @@ from vae import VariationalAutoEncoder
         these local minima.
         
         The general idea is to have 100 % utilization on the GPU with the *smallest* possible
-        batch size. 
+        batch size. So in practice, we aim for large enough batch-sizes so the GPU does not
+        crash from lack of memory
 """
 
 
 @tf.function
-def train_step(inputs, outputs, lengths, encoding_length: int, properties: list, optimizer, autoencoder: VariationalAutoEncoder) -> tuple[float, float]:
+def train_step(inputs: np.ndarray,
+               outputs: np.ndarray,
+               lengths: np.ndarray,
+               encoding_length: int,
+               properties: np.ndarray,
+               optimizer: tf.keras.optimizers.Adam,
+               autoencoder: VariationalAutoEncoder) -> tuple[float, float]:
     """ Performs a single training step (forward pass and backward pass)
 
         :param inputs: encoded inputs used for training
         :param outputs: encoded target outputs used for training
         :param lengths: the lengths of the target outputs
+        :param encoding_length: the overall length of encoding
         :param properties: the properties to use in training
+        :param optimizer: the optimizer to use during training
         :param autoencoder: the autoencoder to use
     """
     with tf.GradientTape() as tape:
-        reconstructed, y_log = autoencoder((inputs, properties), training=True)
-
-        weights = tf.sequence_mask(lengths, encoding_length)
-        weights = tf.cast(weights, dtype=dtypes.int32)
-        weights = tf.cast(weights, dtype=dtypes.float32)
-        seq_loss = tfa.seq2seq.sequence_loss(logits=y_log, targets=outputs, weights=weights)
-        reconstr_loss = tf.reduce_mean(seq_loss)
-        latent_loss = sum(autoencoder.losses)
-        loss = reconstr_loss + latent_loss
+        latent_loss, reconstr_loss = calculate_loss(inputs, outputs, lengths, encoding_length, properties, autoencoder)
+        loss = latent_loss + reconstr_loss
     grads = tape.gradient(loss, autoencoder.trainable_weights)
     optimizer.apply_gradients(zip(grads, autoencoder.trainable_weights))
+    return latent_loss, reconstr_loss
+
+@tf.function
+def calculate_loss(inputs: np.ndarray,
+                   outputs: np.ndarray,
+                   lengths: np.ndarray,
+                   encoding_length: int,
+                   properties: np.ndarray,
+                   autoencoder: VariationalAutoEncoder) -> tuple[float, float]:
+    """ Calculates losses """
+    mask = tf.sequence_mask(lengths, encoding_length)
+    _, y_log = autoencoder((inputs, properties), training=True, mask=mask)
+
+    weights = tf.cast(mask, dtype=dtypes.int32)
+    weights = tf.cast(weights, dtype=dtypes.float32)
+    seq_loss = tfa.seq2seq.sequence_loss(logits=y_log, targets=outputs, weights=weights)
+    reconstr_loss = tf.reduce_mean(seq_loss)
+    latent_loss = sum(autoencoder.losses)
     return latent_loss, reconstr_loss
 
 
@@ -63,7 +90,7 @@ if __name__ == '__main__':
     latent_length = 200
 
     ap = argparse.ArgumentParser("VAE", "python train.py my_smiles_file.smi", "Trains the variational autoencoder and stores the model.")
-    ap.add_argument("file", metavar="FILE", help="file with SMILES")
+    ap.add_argument("file", metavar="FILE", help=".csv file with a minimum of one column named SMILES with rows of smiles strings. Optional columns with molecular data.")
     ap.add_argument("--config", metavar="FILE", default="train.json", type=str, dest="config_file",
                     help="Configuration file to store model and training parameters. Use to reproduce or restart training or when sampling to correctly restore a model. Default is %(default)s.")
     ap.add_argument("-r", "--learning-rate", metavar="RATE", default=learning_rate, type=float, dest="learning_rate",
@@ -71,10 +98,11 @@ if __name__ == '__main__':
     ap.add_argument("-c", "--convergence", metavar="NUMBER", default=learning_convergence, type=float, dest="learning_convergence",
                     help="Stop training when the combined loss (reconstruction + latent) falls below this value. Default is %(default)s.")
     ap.add_argument("--split", metavar="NUMBER", default=0.75, type=float, dest="split", help="fraction of data to use for training.")
-    ap.add_argument("--max-data", metavar="NUMBER", default=100, type=int, dest="max_data", help="max subset of data.")
+    ap.add_argument("--max-data", metavar="NUMBER", default=100, type=int, dest="max_data", help="Max subset of input data to use. Default is %(default)s.")
     ap.add_argument("-e", metavar="NUMBER", dest="epochs", default=10, type=int, help="Number of epochs. Default is %(default)s.")
     ap.add_argument("--batch-size", metavar="SIZE", default=10, type=int,
                     help="Size of the batch when training. Default is %(default)s.")
+    ap.add_argument("-p", "--properties", nargs="*", default=None, dest="properties", metavar="NAME", help="Colum names in the input .csv file to use for additional properties of the VAE.")
 
     encoder_ap = ap.add_argument_group("Encoder", "Controls options specific to the encoder.")
     encoder_ap.add_argument("--encoding-length",
@@ -95,7 +123,7 @@ if __name__ == '__main__':
     backup_ap = ap.add_argument_group("Backup", "Controls options specific to how and when backups are created during training.")
     backup_ap.add_argument("--backup-folder", metavar="FOLDER", default="saved", type=str, dest="backup_folder",
                            help="Folder to store backup in")
-    backup_ap.add_argument("--backup-checkpoint", metavar="FILE", default="checkpoint.ckpt", type=str,
+    backup_ap.add_argument("--backup-checkpoint", metavar="FILE", default="checkpoint", type=str,
                            dest="backup_checkpoint",
                            help="Name of the backup")
     backup_ap.add_argument("--backup-numbering", action="store_true", default=False, dest="backup_numbering",
@@ -124,34 +152,48 @@ if __name__ == '__main__':
             print("Backup with numbers are specified but --backup-rate not specified. Setting --backup-rate to 1.")
             backup_rate = 1
 
-    smiles = encoding.load_smiles_file(args.file)
+    try:
+        df: pd.DataFrame = encoding.load_csv_file(args.file)
+    except ValueError:
+        raise
+
+    smiles = df["SMILES"].values
     can_smiles = [Chem.MolToSmiles(Chem.MolFromSmiles(s), True) for s in smiles]
-    p = np.array([
-        [
-            Descriptors.ExactMolWt(Chem.MolFromSmiles(s)),
-            Crippen.MolLogP(Chem.MolFromSmiles(s))
-        ]
-        for s in can_smiles
-    ])
+    selfies = []
+    if has_selfies:
+        selfies = [sf.encoder(s) for s in can_smiles]
+
+    p = [[] for _ in can_smiles]
+    if args.properties is not None:
+        p = np.array(
+                [df[value].values for value in args.properties]
+        ).transpose()
 
     # encoding of input to one-hot encoding
     input, output, alphabet, vocabulary, lengths = encoding.encode(can_smiles, encoding_seq_length)
+    if has_selfies:
+        input, output, alphabet, vocabulary, lengths = encoding.encode_selfies(selfies, encoding_seq_length)
 
-    # data preparation
+    # data preparation for training and testing
     max_data = args.max_data
     inputs = input[0:max_data][:]
+    outputs = output[0:max_data][:]
     lengths = lengths[0:max_data][:]
     n_split = int(args.split*len(inputs))
 
+    # now we split up the data in train and test
     train_input = inputs[0:n_split]
-    train_output = output[0:n_split]
-    test_input = inputs[n_split:max_data]
-
+    train_output = outputs[0:n_split]
     train_lengths = lengths[0:n_split]
+    train_properties = p[0:n_split]
+    test_input = inputs[n_split:max_data]
+    test_output = outputs[n_split:max_data]
     test_lengths = lengths[n_split:max_data]
+    test_properties = p[n_split:max_data]
 
-    v = VariationalAutoEncoder(latent_size=latent_length, vocab_size=len(alphabet), batch_size=batch_size,
-                               rnn_num_dimensions=rnn_dimensions, rnn_num_layers=rnn_layers_size)
+    v = VariationalAutoEncoder(latent_size=latent_length, vocab_size=len(vocabulary), batch_size=batch_size,
+                               rnn_num_dimensions=rnn_dimensions, rnn_num_layers=rnn_layers_size,
+                               encoding_length=encoding_seq_length)
 
     adam_optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
@@ -160,6 +202,8 @@ if __name__ == '__main__':
     rec_loss = 0.0
     for epoch in range(epochs):
         t_epoch = time.time()
+        train_loss = 0.0
+        test_loss = 0.0
         for step in range(len(train_input)//batch_size):
             t_train_step = time.time()
 
@@ -167,33 +211,29 @@ if __name__ == '__main__':
             train_repr_x = np.array([train_input[i] for i in n])
             train_repr_y = np.array([train_output[i] for i in n])
             weights = np.array([train_lengths[i] for i in n])
-            properties = np.array([p[i] for i in n])
+            properties = np.array([train_properties[i] for i in n])
 
-            lat_loss, rec_loss = train_step(train_repr_x, train_repr_y, weights, encoding_seq_length, properties, adam_optimizer, v)
+            train_lat_loss, train_rec_loss = train_step(train_repr_x, train_repr_y, weights, encoding_seq_length, properties, adam_optimizer, v)
+            train_loss = train_lat_loss + train_rec_loss
 
             dt_step = time.time() - t_train_step
-            if step % 50 == 0:
-                print(f"   train step {step:4d}   lat loss {lat_loss:9.4f}   rec loss {rec_loss:9.4f}")
 
-        # for step in range(len(test_input)//batch_size):
-        #     t_train_step = time.time()
-        #     n = np.random.randint(len(test_input), size=batch_size)
-        #     test_repr = np.array([test_input[i] for i in n])
-        #     l = np.array([test_lengths[i] for i in n])
-        #
-        #     reconstructed, y_log = v(test_repr, training=False)
-        #
-        #     weights = tf.sequence_mask(l, encoding_seq_length)
-        #     weights = tf.cast(weights, dtype=dtypes.int32)
-        #     weights = tf.cast(weights, dtype=dtypes.float32)
-        #     loss = tf.reduce_mean(
-        #             tfa.seq2seq.sequence_loss(logits=y_log, targets=test_repr, weights=weights)
-        #     )
-        #     dt_step = time.time() - t_train_step
-        #     print(f"Test step = {step+1:02d}/{len(test_input) // batch_size:02d}. Time = {dt_step:.1f} sec. Loss = {loss_metric.result():.2f}")
+            # lat_loss, rec_loss = calculate_loss(test)
+            # if step % 50 == 0:
+            #    print(f"   train step {step:4d}   lat loss {lat_loss:9.4f}   rec loss {rec_loss:9.4f}")
+
+        for step in range(len(test_input)//batch_size):
+            t_train_step = time.time()
+            n = np.random.randint(len(test_input), size=batch_size)
+            test_repr_x = np.array([test_input[i] for i in n])
+            test_repr_y = np.array([test_output[i] for i in n])
+            weights = np.array([test_lengths[i] for i in n])
+            properties = np.array([test_properties[i] for i in n])
+            test_rec_loss, test_lat_loss = calculate_loss(test_repr_x, test_repr_y, weights, encoding_seq_length, properties, v)
+            test_loss = test_lat_loss + test_rec_loss
 
         dt_epoch = time.time() - t_epoch
-        print(f"Epoch {epoch+1:03d} finished in {dt_epoch/60:.1f} min. Lat. Loss = {lat_loss:7.4f} Ret. Loss = {rec_loss:7.4f}")
+        print(f"Epoch {epoch+1:03d} finished in {dt_epoch/60:.1f} min. loss(train, test) = ({train_loss:6.4f} {test_loss:7.4f})")
 
         # here we handle backup
         if args.backup_numbering:
@@ -203,9 +243,11 @@ if __name__ == '__main__':
                 v.save_weights(f"{backup_folder}/{backup_checkpoint}", save_format="tf")
 
         # we break of the learning is sufficient
-        if (total_loss := lat_loss + rec_loss) < learning_convergence:
+        if (total_loss := train_loss) < learning_convergence:
             break
 
-    v.save_weights(f"{backup_folder}/{backup_checkpoint}", save_format="tf")
+    # v.save_weights(f"{backup_folder}/{backup_checkpoint}", save_format="tf")
+    save_directory = save(v, f"{backup_folder}/{backup_checkpoint}")
+    print(f"backup stored in {save_directory}")
     print("done")
     v.summary()
